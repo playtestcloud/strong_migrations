@@ -2,6 +2,7 @@
 require "active_support"
 
 # modules
+require "strong_migrations/safe_methods"
 require "strong_migrations/checker"
 require "strong_migrations/database_tasks"
 require "strong_migrations/migration"
@@ -19,7 +20,7 @@ module StrongMigrations
     attr_accessor :auto_analyze, :start_after, :checks, :error_messages,
       :target_postgresql_version, :target_mysql_version, :target_mariadb_version,
       :enabled_checks, :lock_timeout, :statement_timeout, :check_down, :target_version,
-      :lock_timeout_retries, :lock_timeout_delay
+      :lock_timeout_retries, :lock_timeout_delay, :safe_by_default
     attr_writer :lock_timeout_limit
   end
   self.auto_analyze = false
@@ -27,6 +28,7 @@ module StrongMigrations
   self.lock_timeout_retries = 0
   self.lock_timeout_delay = 3 # seconds
   self.checks = []
+  self.safe_by_default = false
   self.error_messages = {
     add_column_default:
 "Adding a column with a non-null default blocks %{rewrite_blocks} while the entire table is rewritten.
@@ -217,6 +219,30 @@ end",
 
     validate_foreign_key:
 "Validating a foreign key while writes are blocked is dangerous.
+Use disable_ddl_transaction! or a separate migration.",
+
+    add_check_constraint:
+"Adding a check constraint key blocks reads and writes while every row is checked.
+Instead, add the check constraint without validating existing rows,
+then validate them in a separate migration.
+
+class %{migration_name} < ActiveRecord::Migration%{migration_suffix}
+  def change
+    %{add_check_constraint_code}
+  end
+end
+
+class Validate%{migration_name} < ActiveRecord::Migration%{migration_suffix}
+  def change
+    %{validate_check_constraint_code}
+  end
+end",
+
+    add_check_constraint_mysql:
+"Adding a check constraint to an existing table is not safe with your database engine.",
+
+    validate_check_constraint:
+"Validating a check constraint while writes are blocked is dangerous.
 Use disable_ddl_transaction! or a separate migration."
   }
   self.enabled_checks = (error_messages.keys - [:remove_index]).map { |k| [k, {}] }.to_h

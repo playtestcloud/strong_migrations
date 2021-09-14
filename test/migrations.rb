@@ -1,6 +1,7 @@
 class AddIndex < TestMigration
   def change
     add_index :users, :name
+    add_index :users, :city
   end
 end
 
@@ -242,6 +243,21 @@ class ChangeColumnNullConstraint < TestMigration
   end
 end
 
+class ChangeColumnNullConstraintMethods < TestMigration
+  disable_ddl_transaction!
+
+  def up
+    add_check_constraint :users, "name IS NOT NULL", name: "test", validate: false
+    validate_check_constraint :users, name: "test"
+    change_column_null :users, :name, false
+    remove_check_constraint :users, name: "test"
+  end
+
+  def down
+    change_column_null :users, :name, true
+  end
+end
+
 class ChangeColumnNullConstraintUnvalidated < TestMigration
   def up
     safety_assured do
@@ -259,6 +275,21 @@ end
 class ChangeColumnNullDefault < TestMigration
   def change
     change_column_null :users, :name, false, "Andy"
+  end
+end
+
+class ChangeColumnNullQuoted < TestMigration
+  def up
+    safety_assured do
+      execute 'ALTER TABLE "users" ADD CONSTRAINT "test" CHECK ("interval" IS NOT NULL) NOT VALID'
+      execute 'ALTER TABLE "users" VALIDATE CONSTRAINT "test"'
+    end
+    change_column_null :users, :interval, false
+  end
+
+  def down
+    execute 'ALTER TABLE "users" DROP CONSTRAINT "test"'
+    change_column_null :users, :interval, true
   end
 end
 
@@ -366,6 +397,12 @@ class AddReferenceForeignKey < TestMigration
   end
 end
 
+class AddReferenceForeignKeyToTable < TestMigration
+  def change
+    add_reference :users, :device, foreign_key: {to_table: :users}, index: false
+  end
+end
+
 class AddReferenceConcurrently < TestMigration
   disable_ddl_transaction!
 
@@ -423,6 +460,50 @@ class AddForeignKeyValidateNoTransaction < TestMigration
   def change
     add_foreign_key :users, :orders, validate: false
     validate_foreign_key :users, :orders
+  end
+end
+
+class AddCheckConstraint < TestMigration
+  def change
+    add_check_constraint :users, "credit_score > 0"
+  end
+end
+
+class AddCheckConstraintSafe < TestMigration
+  def change
+    add_check_constraint :users, "credit_score > 0", validate: false
+  end
+end
+
+class AddCheckConstraintValidateSameTransaction < TestMigration
+  def change
+    add_check_constraint :users, "credit_score > 0", name: "credit_check", validate: false
+    validate_check_constraint :users, name: "credit_check"
+  end
+end
+
+class AddCheckConstraintValidateNoTransaction < TestMigration
+  disable_ddl_transaction!
+
+  def change
+    add_check_constraint :users, "credit_score > 0", name: "credit_check", validate: false
+    validate_check_constraint :users, name: "credit_check"
+  end
+end
+
+class AddCheckConstraintNewTable < TestMigration
+  def change
+    create_table "new_users" do |t|
+      t.string :name
+    end
+
+    add_check_constraint :new_users, "name IS NOT NULL"
+  end
+end
+
+class AddCheckConstraintName < TestMigration
+  def change
+    add_check_constraint :users, "credit_score > 0", name: "credit_check"
   end
 end
 

@@ -1,6 +1,8 @@
 module StrongMigrations
   class Checker
-    attr_accessor :direction
+    include SafeMethods
+
+    attr_accessor :direction, :transaction_disabled
 
     def initialize(migration)
       @migration = migration
@@ -24,7 +26,7 @@ module StrongMigrations
       set_timeouts
       check_lock_timeout
 
-      unless safe?
+      if !safe? || safe_by_default_method?(method)
         case method
         when :remove_column, :remove_columns, :remove_timestamps, :remove_reference, :remove_belongs_to
           columns =
@@ -65,6 +67,7 @@ module StrongMigrations
             raise_error :add_index_columns, header: "Best practice"
           end
           if postgresql? && options[:algorithm] != :concurrently && !new_table?(table)
+            return safe_add_index(table, columns, options) if StrongMigrations.safe_by_default
             raise_error :add_index, command: command_str("add_index", [table, columns, options.merge(algorithm: :concurrently)])
           end
         when :remove_index
@@ -75,6 +78,7 @@ module StrongMigrations
           options ||= {}
 
           if postgresql? && options[:algorithm] != :concurrently && !new_table?(table)
+            return safe_remove_index(table, options) if StrongMigrations.safe_by_default
             raise_error :remove_index, command: command_str("remove_index", [table, options.merge(algorithm: :concurrently)])
           end
         when :add_column
@@ -184,13 +188,13 @@ Then add the NOT NULL constraint in separate migrations."
             bad_index = index_value && !concurrently_set
 
             if bad_index || options[:foreign_key]
-              columns = options[:polymorphic] ? [:"#{reference}_type", :"#{reference}_id"] : :"#{reference}_id"
-
               if index_value.is_a?(Hash)
                 options[:index] = options[:index].merge(algorithm: :concurrently)
               else
                 options = options.merge(index: {algorithm: :concurrently})
               end
+
+              return safe_add_reference(table, reference, options) if StrongMigrations.safe_by_default
 
               if options.delete(:foreign_key)
                 headline = "Adding a foreign key blocks writes on both tables."
@@ -215,22 +219,49 @@ Then add the foreign key in separate migrations."
             if postgresql?
               safe = false
               if postgresql_version >= Gem::Version.new("12")
-                # TODO likely need to quote the column in some situations
-                safe = constraints(table).any? { |c| c["def"] == "CHECK ((#{column} IS NOT NULL))" }
+                safe = constraints(table).any? { |c| c["def"] == "CHECK ((#{column} IS NOT NULL))" || c["def"] == "CHECK ((#{connection.quote_column_name(column)} IS NOT NULL))" }
               end
 
               unless safe
                 # match https://github.com/nullobject/rein
                 constraint_name = "#{table}_#{column}_null"
 
-                validate_constraint_code = String.new(constraint_str("ALTER TABLE %s VALIDATE CONSTRAINT %s", [table, constraint_name]))
+                add_code = constraint_str("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s IS NOT NULL) NOT VALID", [table, constraint_name, column])
+                validate_code = constraint_str("ALTER TABLE %s VALIDATE CONSTRAINT %s", [table, constraint_name])
+                remove_code = constraint_str("ALTER TABLE %s DROP CONSTRAINT %s", [table, constraint_name])
+
+                validate_constraint_code =
+                  if ar_version >= 6.1
+                    String.new(command_str(:validate_check_constraint, [table, {name: constraint_name}]))
+                  else
+                    String.new(safety_assured_str(validate_code))
+                  end
+
                 if postgresql_version >= Gem::Version.new("12")
-                  validate_constraint_code << "\n    #{command_str(:change_column_null, [table, column, null])}"
-                  validate_constraint_code << "\n    #{constraint_str("ALTER TABLE %s DROP CONSTRAINT %s", [table, constraint_name])}"
+                  change_args = [table, column, null]
+
+                  validate_constraint_code << "\n    #{command_str(:change_column_null, change_args)}"
+
+                  if ar_version >= 6.1
+                    validate_constraint_code << "\n    #{command_str(:remove_check_constraint, [table, {name: constraint_name}])}"
+                  else
+                    validate_constraint_code << "\n    #{safety_assured_str(remove_code)}"
+                  end
                 end
 
+                return safe_change_column_null(add_code, validate_code, change_args, remove_code) if StrongMigrations.safe_by_default
+
+                add_constraint_code =
+                  if ar_version >= 6.1
+                    # only quote when needed
+                    expr_column = column.to_s =~ /\A[a-z0-9_]+\z/ ? column : connection.quote_column_name(column)
+                    command_str(:add_check_constraint, [table, "#{expr_column} IS NOT NULL", {name: constraint_name, validate: false}])
+                  else
+                    safety_assured_str(add_code)
+                  end
+
                 raise_error :change_column_null_postgresql,
-                  add_constraint_code: constraint_str("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s IS NOT NULL) NOT VALID", [table, constraint_name, column]),
+                  add_constraint_code: add_constraint_code,
                   validate_constraint_code: validate_constraint_code
               end
             elsif mysql? || mariadb?
@@ -245,20 +276,27 @@ Then add the foreign key in separate migrations."
           options ||= {}
 
           # always validated before 5.2
-          validate = options.fetch(:validate, true) || ActiveRecord::VERSION::STRING < "5.2"
+          validate = options.fetch(:validate, true) || ar_version < 5.2
 
           if postgresql? && validate
-            if ActiveRecord::VERSION::STRING < "5.2"
+            if ar_version < 5.2
               # fk name logic from rails
               primary_key = options[:primary_key] || "id"
               column = options[:column] || "#{to_table.to_s.singularize}_id"
               hashed_identifier = Digest::SHA256.hexdigest("#{from_table}_#{column}_fk").first(10)
               fk_name = options[:name] || "fk_rails_#{hashed_identifier}"
 
+              add_code = constraint_str("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s) NOT VALID", [from_table, fk_name, column, to_table, primary_key])
+              validate_code = constraint_str("ALTER TABLE %s VALIDATE CONSTRAINT %s", [from_table, fk_name])
+
+              return safe_add_foreign_key_code(from_table, to_table, add_code, validate_code) if StrongMigrations.safe_by_default
+
               raise_error :add_foreign_key,
-                add_foreign_key_code: constraint_str("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s) NOT VALID", [from_table, fk_name, column, to_table, primary_key]),
-                validate_foreign_key_code: constraint_str("ALTER TABLE %s VALIDATE CONSTRAINT %s", [from_table, fk_name])
+                add_foreign_key_code: safety_assured_str(add_code),
+                validate_foreign_key_code: safety_assured_str(validate_code)
             else
+              return safe_add_foreign_key(from_table, to_table, options) if StrongMigrations.safe_by_default
+
               raise_error :add_foreign_key,
                 add_foreign_key_code: command_str("add_foreign_key", [from_table, to_table, options.merge(validate: false)]),
                 validate_foreign_key_code: command_str("validate_foreign_key", [from_table, to_table])
@@ -267,6 +305,29 @@ Then add the foreign key in separate migrations."
         when :validate_foreign_key
           if postgresql? && writes_blocked?
             raise_error :validate_foreign_key
+          end
+        when :add_check_constraint
+          table, expression, options = args
+          options ||= {}
+
+          if !new_table?(table)
+            if postgresql? && options[:validate] != false
+              add_options = options.merge(validate: false)
+              name = options[:name] || @migration.check_constraint_options(table, expression, options)[:name]
+              validate_options = {name: name}
+
+              return safe_add_check_constraint(table, expression, add_options, validate_options) if StrongMigrations.safe_by_default
+
+              raise_error :add_check_constraint,
+                add_check_constraint_code: command_str("add_check_constraint", [table, expression, add_options]),
+                validate_check_constraint_code: command_str("validate_check_constraint", [table, validate_options])
+            elsif mysql? || mariadb?
+              raise_error :add_check_constraint_mysql
+            end
+          end
+        when :validate_check_constraint
+          if postgresql? && writes_blocked?
+            raise_error :validate_check_constraint
           end
         end
 
@@ -284,11 +345,7 @@ Then add the foreign key in separate migrations."
 
       # outdated statistics + a new index can hurt performance of existing queries
       if StrongMigrations.auto_analyze && direction == :up && method == :add_index
-        if postgresql?
-          connection.execute "ANALYZE #{connection.quote_table_name(args[0].to_s)}"
-        elsif mariadb? || mysql?
-          connection.execute "ANALYZE TABLE #{connection.quote_table_name(args[0].to_s)}"
-        end
+        analyze_table(args[0])
       end
 
       result
@@ -356,8 +413,7 @@ Then add the foreign key in separate migrations."
     end
 
     def safe?
-      @safe || ENV["SAFETY_ASSURED"] || @migration.is_a?(ActiveRecord::Schema) ||
-        (direction == :down && !StrongMigrations.check_down) || version_safe?
+      @safe || ENV["SAFETY_ASSURED"] || (direction == :down && !StrongMigrations.check_down) || version_safe?
     end
 
     def version_safe?
@@ -412,6 +468,10 @@ Then add the foreign key in separate migrations."
       Gem::Version.new(version)
     end
 
+    def ar_version
+      ActiveRecord::VERSION::STRING.to_f
+    end
+
     def check_lock_timeout
       limit = StrongMigrations.lock_timeout_limit
 
@@ -464,6 +524,14 @@ Then add the foreign key in separate migrations."
       end
     end
 
+    def analyze_table(table)
+      if postgresql?
+        connection.execute "ANALYZE #{connection.quote_table_name(table.to_s)}"
+      elsif mariadb? || mysql?
+        connection.execute "ANALYZE TABLE #{connection.quote_table_name(table.to_s)}"
+      end
+    end
+
     def constraints(table_name)
       query = <<~SQL
         SELECT
@@ -496,7 +564,10 @@ Then add the foreign key in separate migrations."
 
     def constraint_str(statement, identifiers)
       # not all identifiers are tables, but this method of quoting should be fine
-      code = statement % identifiers.map { |v| connection.quote_table_name(v) }
+      statement % identifiers.map { |v| connection.quote_table_name(v) }
+    end
+
+    def safety_assured_str(code)
       "safety_assured do\n      execute '#{code}' \n    end"
     end
 

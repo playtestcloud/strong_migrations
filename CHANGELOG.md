@@ -1,6 +1,32 @@
-## 0.7.3 (unreleased)
+## 0.7.9 (unreleased)
 
 - Added experimental support for lock timeout retries
+
+## 0.7.8 (2021-08-03)
+
+- Fixed issue with `add_reference ..., foreign_key: {to_table: ...}` with `safe_by_default`
+
+## 0.7.7 (2021-06-07)
+
+- Removed timeouts and `auto_analyze` from schema load
+
+## 0.7.6 (2021-01-17)
+
+- Fixed `NOT NULL` constraint check for quoted columns
+- Fixed deprecation warning with Active Record 6.1
+
+## 0.7.5 (2021-01-12)
+
+- Added checks for `add_check_constraint` and `validate_check_constraint`
+
+## 0.7.4 (2020-12-16)
+
+- Added `safe_by_default` option to install generator
+- Fixed warnings with Active Record 6.1
+
+## 0.7.3 (2020-11-24)
+
+- Added `safe_by_default` option
 
 ## 0.7.2 (2020-10-25)
 

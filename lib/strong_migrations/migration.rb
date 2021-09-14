@@ -3,9 +3,12 @@ module StrongMigrations
     def migrate(direction)
       strong_migrations_checker.direction = direction
       super
+      connection.begin_db_transaction if strong_migrations_checker.transaction_disabled
     end
 
     def method_missing(method, *args)
+      return super if is_a?(ActiveRecord::Schema)
+
       strong_migrations_checker.perform(method, *args) do
         super
       end
