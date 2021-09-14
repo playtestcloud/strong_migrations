@@ -361,6 +361,7 @@ Then add the foreign key in separate migrations."
           retries += 1
           @migration.say "Lock timeout. Retrying shortly..."
           sleep StrongMigrations.lock_timeout_delay
+          @timeouts_set = false
           retry
         end
         raise e
